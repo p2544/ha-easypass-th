@@ -230,7 +230,14 @@ class EasyPassScraper:
         seen_card_ids: set[str] = set()
 
         for page in range(1, MAX_CARDS + 1):
-            data = self._fetch_card_page(csrf_token, page)
+            try:
+                data = self._fetch_card_page(csrf_token, page)
+            except EasyPassConnectionError:
+                if page == 1:
+                    raise
+                _LOGGER.debug("Stopping card pagination after page %d failed.", page)
+                break
+
             page_cards = self._parse_cards(data)
             if not page_cards:
                 break
@@ -270,7 +277,7 @@ class EasyPassScraper:
         try:
             api_resp = self._session.get(
                 CARD_API_URL,
-                params={"_token": csrf_token, "page": page, "length": MAX_CARDS},
+                params={"_token": csrf_token, "page": page},
                 headers={
                     "X-Requested-With": "XMLHttpRequest",
                     "Referer": CARD_LIST_URL,
@@ -399,7 +406,9 @@ class EasyPassScraper:
             AC_Balance                         → balance
             easyPassPlusData.mflowRegisterMessage → mflow_message
         """
-        raw_cards: list = (data.get("easyPassCardsData") or {}).get("data") or []
+        paged_cards: list = (data.get("easyPassCardsData") or {}).get("data") or []
+        dropdown: list = data.get("easyPassCardsDataDropdown") or []
+        raw_cards: list = dropdown if len(dropdown) > len(paged_cards) else paged_cards
         if not raw_cards:
             _LOGGER.warning("Card API returned no cards. Keys: %s", list(data.keys()))
             return []
@@ -427,7 +436,6 @@ class EasyPassScraper:
                 _LOGGER.debug("Parsed card: %s", card)
 
         # Reward points from the parallel dropdown list (index matches card position)
-        dropdown: list = data.get("easyPassCardsDataDropdown") or []
         for i, card in enumerate(results):
             if i < len(dropdown):
                 raw_points = dropdown[i].get("Reward_Point")
