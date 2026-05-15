@@ -34,6 +34,7 @@ from .const import (
     CARD_LIST_URL,
     LOGIN_POST_URL,
     LOGIN_URL,
+    MAX_CARDS,
     MAX_LOGIN_RETRIES,
     REQUEST_TIMEOUT_SECONDS,
     SESSION_USER_AGENT,
@@ -223,11 +224,53 @@ class EasyPassScraper:
         csrf_token = self._extract_csrf_meta(page_resp.text)
         _LOGGER.debug("Card page CSRF token: %s…", csrf_token[:10] if csrf_token else "NONE")
 
-        # Step 2: call the JSON API
+        # Step 2: call the JSON API. The site defaults to 10 rows per page and
+        # may ignore length=20, so fetch pages until we have enough unique cards.
+        cards: list[EasyPassCard] = []
+        seen_card_ids: set[str] = set()
+
+        for page in range(1, MAX_CARDS + 1):
+            data = self._fetch_card_page(csrf_token, page)
+            page_cards = self._parse_cards(data)
+            if not page_cards:
+                break
+
+            new_cards = 0
+            for card in page_cards:
+                card_id = card.serial_number or card.license_plate or card.cust_acct_id
+                if card_id in seen_card_ids:
+                    continue
+
+                seen_card_ids.add(card_id)
+                cards.append(card)
+                new_cards += 1
+
+                if len(cards) >= MAX_CARDS:
+                    break
+
+            if len(cards) >= MAX_CARDS:
+                break
+            if new_cards == 0:
+                _LOGGER.debug("Stopping card pagination at page %d; no new cards found.", page)
+                break
+
+        _LOGGER.debug("Total cards collected across pages: %d", len(cards))
+
+        # Fetch usage history for each card that has a cust_acct_id
+        for card in cards:
+            if card.cust_acct_id and csrf_token:
+                card.usage_history = self._fetch_usage(card.cust_acct_id, csrf_token)
+
+        return cards
+
+    def _fetch_card_page(self, csrf_token: str, page: int) -> dict:
+        """Fetch one paginated card API response."""
+        assert self._session is not None
+
         try:
             api_resp = self._session.get(
                 CARD_API_URL,
-                params={"_token": csrf_token, "page": 1, "length": 20},
+                params={"_token": csrf_token, "page": page, "length": MAX_CARDS},
                 headers={
                     "X-Requested-With": "XMLHttpRequest",
                     "Referer": CARD_LIST_URL,
@@ -247,14 +290,7 @@ class EasyPassScraper:
             ) from exc
 
         _LOGGER.debug("Card API response keys: %s", list(data.keys()) if isinstance(data, dict) else type(data))
-        cards = self._parse_cards(data)
-
-        # Fetch usage history for each card that has a cust_acct_id
-        for card in cards:
-            if card.cust_acct_id and csrf_token:
-                card.usage_history = self._fetch_usage(card.cust_acct_id, csrf_token)
-
-        return cards
+        return data
 
     # ------------------------------------------------------------------
     # Parsing helpers  –– ADAPT THESE to match actual site HTML
